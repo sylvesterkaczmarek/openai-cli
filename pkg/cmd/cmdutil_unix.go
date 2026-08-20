@@ -39,27 +39,29 @@ func streamOutputOSSpecific(label string, generateOutput func(w *os.File) error)
 		os.Setenv("FORCE_COLOR", "1")
 	}
 
-	// If the pager exits before reading all input, then generateOutput() will
-	// produce a broken pipe error, which is fine and we don't want to propagate it.
-	if err := generateOutput(pagerInput); err != nil &&
-		!strings.Contains(err.Error(), "broken pipe") {
+	// Always close the pager input and reap the child once ForkExec succeeds.
+	// In particular, a non-broken-pipe error from generateOutput must not return
+	// early and leave the pager process unreaped.
+	generateErr := generateOutput(pagerInput)
+	pagerInput.Close()
+	pagerErr := waitForPager(pid)
+
+	if generateErr != nil && !strings.Contains(generateErr.Error(), "broken pipe") {
+		return generateErr
+	}
+	return pagerErr
+}
+
+func waitForPager(pid int) error {
+	var wstatus syscall.WaitStatus
+	_, err := syscall.Wait4(pid, &wstatus, 0, nil)
+	if err != nil {
 		return err
 	}
-
-	// Close the file NOW before we wait for the child process to terminate.
-	// This way, the child will receive the end-of-file signal and know that
-	// there is no more input. Otherwise the child process may block
-	// indefinitely waiting for another line (this can happen when streaming
-	// less than a screenful of data to a pager).
-	pagerInput.Close()
-
-	// Wait for child process to exit
-	var wstatus syscall.WaitStatus
-	_, err = syscall.Wait4(pid, &wstatus, 0, nil)
 	if wstatus.ExitStatus() != 0 {
 		return fmt.Errorf("Pager exited with non-zero exit status: %d", wstatus.ExitStatus())
 	}
-	return err
+	return nil
 }
 
 func openSocketPairPager(label string) (*os.File, int, error) {
